@@ -82,6 +82,7 @@ func main() {
 	port := envOrDefault("PORT", "8080")
 	instance := envOrDefault("INSTANCE_ID", "api")
 	nprobeOverride := envOrDefault("IVF_NPROBE", "")
+	fullNprobeOverride := envOrDefault("IVF_FULL_NPROBE", "")
 
 	idx, err := loadIndex(instance)
 	if err != nil {
@@ -92,6 +93,12 @@ func main() {
 			log.Fatalf("[%s] invalid IVF_NPROBE: %v", instance, err)
 		}
 		log.Printf("[%s] IVF nprobe override: %s", instance, nprobeOverride)
+	}
+	if fullNprobeOverride != "" {
+		if err := idx.SetIVFFullNprobe(fullNprobeOverride); err != nil {
+			log.Fatalf("[%s] invalid IVF_FULL_NPROBE: %v", instance, err)
+		}
+		log.Printf("[%s] IVF fullNprobe (two-stage) override: %s", instance, fullNprobeOverride)
 	}
 
 	ready := func(w http.ResponseWriter, _ *http.Request) {

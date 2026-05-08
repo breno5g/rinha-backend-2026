@@ -8,6 +8,7 @@ services:
       INSTANCE_ID: api1
       PORT: "8080"
       IVF_NPROBE: "${IVF_NPROBE:-}"
+      IVF_FULL_NPROBE: "${IVF_FULL_NPROBE:-}"
     networks:
       - rinha
     deploy:
@@ -22,6 +23,7 @@ services:
       INSTANCE_ID: api2
       PORT: "8080"
       IVF_NPROBE: "${IVF_NPROBE:-}"
+      IVF_FULL_NPROBE: "${IVF_FULL_NPROBE:-}"
     networks:
       - rinha
     depends_on:
