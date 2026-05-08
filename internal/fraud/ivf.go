@@ -22,6 +22,21 @@ func (idx *Index) SetIVFNprobe(value string) error {
 	return nil
 }
 
+// SetIVFFullNprobe configures the second-pass probe count for two-stage search.
+// Set to 0 (or any value ≤ nprobe) to disable two-stage and always use the
+// fast pass.
+func (idx *Index) SetIVFFullNprobe(value string) error {
+	if idx.ivf == nil {
+		return fmt.Errorf("IVF index is not built; cannot tune fullNprobe")
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 || n > idx.ivf.numCentroids {
+		return fmt.Errorf("fullNprobe must be an integer in [0, %d], got %q", idx.ivf.numCentroids, value)
+	}
+	idx.ivf.fullNprobe = n
+	return nil
+}
+
 // IVF (Inverted File) index parameters.
 //
 // numCentroids — how finely we partition the space. Standard rule of thumb is
@@ -37,10 +52,10 @@ func (idx *Index) SetIVFNprobe(value string) error {
 // kMeansSampleSize / kMeansIterations control build cost. K-means runs on a
 // random sample (cheap), then we assign every ref to its nearest centroid.
 const (
-	defaultNumCentroids     = 256
-	defaultNprobe           = 16
-	defaultKMeansSampleSize = 50_000
-	defaultKMeansIterations = 8
+	defaultNumCentroids     = 2048
+	defaultNprobe           = 8
+	defaultKMeansSampleSize = 100_000
+	defaultKMeansIterations = 12
 )
 
 // ivfIndex stores everything needed to do an IVF lookup.
@@ -54,7 +69,8 @@ const (
 type ivfIndex struct {
 	centroids      []int8  // flat: numCentroids × VectorDim
 	numCentroids   int
-	nprobe         int
+	nprobe         int     // fast/single-stage probe count
+	fullNprobe     int     // expanded probe count for borderline queries (0 disables two-stage)
 	refOrder       []int32 // refs reordered by cluster
 	clusterOffsets []int32 // length = numCentroids+1; cluster c spans refOrder[clusterOffsets[c]:clusterOffsets[c+1]]
 }
@@ -224,11 +240,47 @@ func buildInvertedLists(assignments []int32, numCentroids int) (refOrder []int32
 	return refOrder, clusterOffsets
 }
 
-// ivfTopK is the approximate k-NN search. It computes distance from query to
-// every centroid, picks the top-nprobe nearest, and brute-forces inside those
-// clusters only. Recall depends on nprobe: more clusters scanned → higher
-// recall, more time spent.
+// ivfTopK is the public k-NN entry point. If `fullNprobe` is configured and
+// the cheap pass returns a borderline result (2 or 3 fraud votes among top-K),
+// it re-runs with the larger probe budget to confirm. Otherwise it returns
+// the fast result directly.
+//
+// Why two-stage: most queries are clearly fraud (5/0 votes) or clearly legit
+// (0/5). Only the ~20-30% borderline queries — where the fast pass returns
+// 2 or 3 fraud votes — actually benefit from a wider probe radius. Spending
+// the extra work only when needed cuts the average per-query CPU significantly
+// while keeping the recall high on the cases that matter most.
 func (idx *Index) ivfTopK(query [VectorDim]int8) [K]neighbor {
+	var top [K]neighbor
+	for slot := range top {
+		top[slot].squaredDistance = math.MaxInt32
+	}
+	if idx.ivf == nil {
+		return top
+	}
+
+	fast := idx.ivfTopKWithNprobe(query, idx.ivf.nprobe)
+	if idx.ivf.fullNprobe <= idx.ivf.nprobe {
+		return fast
+	}
+	fraudVotes := 0
+	for _, n := range fast {
+		if n.label == labelFraud {
+			fraudVotes++
+		}
+	}
+	// 0/1 → clearly legit; 4/5 → clearly fraud. 2/3 is the gray zone.
+	if fraudVotes <= 1 || fraudVotes >= 4 {
+		return fast
+	}
+	return idx.ivfTopKWithNprobe(query, idx.ivf.fullNprobe)
+}
+
+// ivfTopKWithNprobe runs a single-pass IVF search with the given probe count.
+// Computes distance to every centroid, picks the top-nprobe nearest, then
+// brute-forces inside those clusters maintaining a top-K with an admission
+// threshold and early termination per ref.
+func (idx *Index) ivfTopKWithNprobe(query [VectorDim]int8, nprobe int) [K]neighbor {
 	var top [K]neighbor
 	for slot := range top {
 		top[slot].squaredDistance = math.MaxInt32
@@ -255,18 +307,17 @@ func (idx *Index) ivfTopK(query [VectorDim]int8) [K]neighbor {
 	}
 
 	// Step 2: pick top-nprobe nearest centroids. Full sort is fine since
-	// numCentroids is small (typically 256).
+	// numCentroids is small (≤4096).
 	sort.Slice(centroidDistances, func(i, j int) bool {
 		return centroidDistances[i].distance < centroidDistances[j].distance
 	})
 
-	probesToScan := ivf.nprobe
+	probesToScan := nprobe
 	if probesToScan > ivf.numCentroids {
 		probesToScan = ivf.numCentroids
 	}
 
-	// Step 3: scan refs inside the chosen clusters, maintain top-K with
-	// admission threshold + early termination, like brute force.
+	// Step 3: scan refs inside the chosen clusters.
 	kthBest := top[K-1].squaredDistance
 	for probe := 0; probe < probesToScan; probe++ {
 		cluster := centroidDistances[probe].clusterIdx
