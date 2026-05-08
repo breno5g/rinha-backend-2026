@@ -37,8 +37,9 @@ coverage/
 # Docker
 *.pid
 
-# Reference data (large)
+# Reference data (large) — block by default, allow the official Rinha dataset
 *.json.gz
+!resources/references.json.gz
 
 # Cloned reference repos (kept for docs only — see README)
 rinha-de-backend-2026/
