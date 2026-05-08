@@ -1,3 +1,4 @@
+# NOTA: limites de memória elevados para testes iniciais
 services:
   api1:
     build:
@@ -6,13 +7,15 @@ services:
     environment:
       INSTANCE_ID: api1
       PORT: "8080"
+    volumes:
+      - ./resources:/resources:ro
     networks:
       - rinha
     deploy:
       resources:
         limits:
           cpus: "0.45"
-          memory: "160MB"
+          memory: "250MB"
 
   api2:
     build:
@@ -21,13 +24,15 @@ services:
     environment:
       INSTANCE_ID: api2
       PORT: "8080"
+    volumes:
+      - ./resources:/resources:ro
     networks:
       - rinha
     deploy:
       resources:
         limits:
           cpus: "0.45"
-          memory: "160MB"
+          memory: "250MB"
 
   load-balancer:
     image: nginx:1.27-alpine
