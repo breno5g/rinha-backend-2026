@@ -3,13 +3,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: rinha-fraud-api
     environment:
       INSTANCE_ID: api1
       PORT: "8080"
-      INDEX_KIND: "${INDEX_KIND:-ivf}"
       IVF_NPROBE: "${IVF_NPROBE:-}"
-    volumes:
-      - ./resources:/resources:ro
     networks:
       - rinha
     deploy:
@@ -19,18 +17,15 @@ services:
           memory: "160MB"
 
   api2:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: rinha-fraud-api
     environment:
       INSTANCE_ID: api2
       PORT: "8080"
-      INDEX_KIND: "${INDEX_KIND:-ivf}"
       IVF_NPROBE: "${IVF_NPROBE:-}"
-    volumes:
-      - ./resources:/resources:ro
     networks:
       - rinha
+    depends_on:
+      - api1
     deploy:
       resources:
         limits:
