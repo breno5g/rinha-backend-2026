@@ -1,4 +1,3 @@
-# NOTA: limites de memória elevados para testes iniciais
 services:
   api1:
     build:
@@ -15,7 +14,7 @@ services:
       resources:
         limits:
           cpus: "0.45"
-          memory: "250MB"
+          memory: "160MB"
 
   api2:
     build:
@@ -32,7 +31,7 @@ services:
       resources:
         limits:
           cpus: "0.45"
-          memory: "250MB"
+          memory: "160MB"
 
   load-balancer:
     image: nginx:1.27-alpine
