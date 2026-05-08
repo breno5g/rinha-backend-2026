@@ -1,0 +1,45 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Build / dependencies
+node_modules/
+dist/
+build/
+target/
+*.pyc
+__pycache__/
+.venv/
+venv/
+
+# Coverage / cache
+coverage/
+.nyc_output/
+.cache/
+.pytest_cache/
+
+# Docker
+*.pid
+
+# Reference data (large)
+*.json.gz
+
+# Cloned reference repos (kept for docs only — see README)
+rinha-de-backend-2026/
+rinha-2026-base/
