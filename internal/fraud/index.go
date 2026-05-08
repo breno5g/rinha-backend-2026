@@ -32,10 +32,14 @@ const (
 // At 1 byte per dimension, 3M references occupy ~42 MB (vs ~168 MB for float32).
 // The 4× reduction means more vectors fit in L2/L3 cache during scanning,
 // which is where most of the speedup comes from — not the cheaper arithmetic.
+//
+// `tree` is an optional VP-tree that prunes the search to O(log N) on average.
+// When nil (or empty), Score falls back to brute force.
 type Index struct {
 	Constants *Constants
 	vectors   []int8
 	labels    []uint8
+	tree      []vpNode
 }
 
 type referenceEntry struct {
@@ -67,8 +71,8 @@ func quantizeVector(v [VectorDim]float32) [VectorDim]int8 {
 }
 
 // LoadIndex reads references.json.gz, quantizes each vector to int8 in place,
-// and packs everything into the flat layout. It also loads normalization
-// constants and the MCC risk table.
+// builds the VP-tree, and packs everything into the flat layout. It also
+// loads normalization constants and the MCC risk table.
 func LoadIndex(referencesGzPath, normalizationPath, mccRiskPath string) (*Index, error) {
 	constants, err := LoadConstants(normalizationPath, mccRiskPath)
 	if err != nil {
@@ -129,20 +133,43 @@ func LoadIndex(referencesGzPath, normalizationPath, mccRiskPath string) (*Index,
 		len(labels), time.Since(loadStart).Round(time.Millisecond),
 		float64(len(vectors))/1024/1024)
 
-	return &Index{Constants: constants, vectors: vectors, labels: labels}, nil
+	treeStart := time.Now()
+	log.Printf("building VP-tree over %d references ...", len(labels))
+	tree := buildVPTree(vectors, len(labels))
+	log.Printf("VP-tree ready in %s (%d nodes, %.1f MB)",
+		time.Since(treeStart).Round(time.Millisecond),
+		len(tree),
+		float64(len(tree)*16)/1024/1024)
+
+	return &Index{Constants: constants, vectors: vectors, labels: labels, tree: tree}, nil
 }
 
-// Score vectorizes the payload, quantizes it, and runs KNN brute force on int8.
+// Score vectorizes the payload, quantizes it, runs k-NN, and returns
+// `approved` + `fraud_score` per the rules.
 func (idx *Index) Score(payload *Payload) (approved bool, score float32, err error) {
 	queryFloat, err := Vectorize(payload, idx.Constants)
 	if err != nil {
 		return false, 0, err
 	}
 	queryVector := quantizeVector(queryFloat)
-	fraudCount := idx.knnFraudCount(queryVector)
+	top := idx.topK(queryVector)
+	fraudCount := 0
+	for _, n := range top {
+		if n.label == labelFraud {
+			fraudCount++
+		}
+	}
 	score = float32(fraudCount) / float32(K)
 	approved = score < Threshold
 	return approved, score, nil
+}
+
+// topK dispatches to the VP-tree search if available, otherwise to brute force.
+func (idx *Index) topK(query [VectorDim]int8) [K]neighbor {
+	if len(idx.tree) > 0 {
+		return idx.vpTreeTopK(query)
+	}
+	return idx.bruteForceTopK(query)
 }
 
 // neighbor is a single reference ranked by its squared L2 distance to the query.
@@ -153,10 +180,10 @@ type neighbor struct {
 	label           uint8
 }
 
-// knnFraudCount finds the K nearest references by squared L2 distance and
-// returns how many are labeled "fraud". Uses int8 arithmetic (cheap) plus an
-// insertion-sorted top-K with an "admission threshold" for early termination.
-func (idx *Index) knnFraudCount(query [VectorDim]int8) int {
+// bruteForceTopK scans every reference and returns the K nearest, sorted
+// ascending by squared L2 distance. Used as a correctness oracle for the
+// VP-tree search and as the fallback when no tree is built.
+func (idx *Index) bruteForceTopK(query [VectorDim]int8) [K]neighbor {
 	// nearestNeighbors stays sorted ascending by distance:
 	//   [0] = closest, [K-1] = K-th closest.
 	var nearestNeighbors [K]neighbor
@@ -172,8 +199,7 @@ func (idx *Index) knnFraudCount(query [VectorDim]int8) int {
 		vectorOffset := referenceIndex * VectorDim
 
 		// Accumulate squared L2 dimension-by-dimension. Bail out early if the
-		// partial sum already crosses the admission threshold — saves us the
-		// remaining multiplications/additions on this reference.
+		// partial sum already crosses the admission threshold.
 		var squaredDistance int32
 		for dim := 0; dim < VectorDim; dim++ {
 			diff := int32(query[dim]) - int32(idx.vectors[vectorOffset+dim])
@@ -186,8 +212,7 @@ func (idx *Index) knnFraudCount(query [VectorDim]int8) int {
 			continue
 		}
 
-		// Insertion-sort into the top-K, then refresh the threshold so the
-		// next iteration prunes more aggressively.
+		// Insertion-sort into the top-K, then refresh the threshold.
 		referenceLabel := idx.labels[referenceIndex]
 		insertionPos := K - 1
 		for insertionPos > 0 && nearestNeighbors[insertionPos-1].squaredDistance > squaredDistance {
@@ -197,14 +222,21 @@ func (idx *Index) knnFraudCount(query [VectorDim]int8) int {
 		nearestNeighbors[insertionPos] = neighbor{squaredDistance: squaredDistance, label: referenceLabel}
 		kthBestDistance = nearestNeighbors[K-1].squaredDistance
 	}
+	return nearestNeighbors
+}
 
-	fraudCount := 0
-	for _, topNeighbor := range nearestNeighbors {
-		if topNeighbor.label == labelFraud {
-			fraudCount++
+// knnFraudCount is a thin wrapper around bruteForceTopK that returns the
+// number of "fraud"-labeled references among the K nearest. Kept for tests
+// and benchmarks that want to exercise the brute-force path.
+func (idx *Index) knnFraudCount(query [VectorDim]int8) int {
+	top := idx.bruteForceTopK(query)
+	count := 0
+	for _, n := range top {
+		if n.label == labelFraud {
+			count++
 		}
 	}
-	return fraudCount
+	return count
 }
 
 // Size returns the number of references loaded into the index.
