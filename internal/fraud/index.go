@@ -33,13 +33,16 @@ const (
 // The 4× reduction means more vectors fit in L2/L3 cache during scanning,
 // which is where most of the speedup comes from — not the cheaper arithmetic.
 //
-// `tree` is an optional VP-tree that prunes the search to O(log N) on average.
-// When nil (or empty), Score falls back to brute force.
+// `tree` is an optional VP-tree that prunes exact search to O(log N) on average.
+// `ivf` is an optional Inverted-File index for approximate search.
+// `topK` dispatches to whichever is set, with IVF preferred when both are present.
+// When neither is set, Score falls back to brute force.
 type Index struct {
 	Constants *Constants
 	vectors   []int8
 	labels    []uint8
 	tree      []vpNode
+	ivf       *ivfIndex
 }
 
 type referenceEntry struct {
@@ -70,10 +73,22 @@ func quantizeVector(v [VectorDim]float32) [VectorDim]int8 {
 	return out
 }
 
-// LoadIndex reads references.json.gz, quantizes each vector to int8 in place,
-// builds the VP-tree, and packs everything into the flat layout. It also
-// loads normalization constants and the MCC risk table.
-func LoadIndex(referencesGzPath, normalizationPath, mccRiskPath string) (*Index, error) {
+// IndexKind selects which secondary structure (if any) to build at startup.
+type IndexKind string
+
+const (
+	// KindBrute uses linear scan over all references.
+	KindBrute IndexKind = "brute"
+	// KindVP builds a vantage-point tree (exact, ~46MB for 3M refs).
+	KindVP IndexKind = "vp"
+	// KindIVF builds an Inverted File index (approximate, ~12MB for 3M refs).
+	KindIVF IndexKind = "ivf"
+)
+
+// LoadIndex reads references.json.gz, quantizes each vector to int8, builds
+// the requested secondary structure, and returns the ready-to-query Index.
+// It also loads normalization constants and the MCC risk table.
+func LoadIndex(kind IndexKind, referencesGzPath, normalizationPath, mccRiskPath string) (*Index, error) {
 	constants, err := LoadConstants(normalizationPath, mccRiskPath)
 	if err != nil {
 		return nil, err
@@ -133,15 +148,34 @@ func LoadIndex(referencesGzPath, normalizationPath, mccRiskPath string) (*Index,
 		len(labels), time.Since(loadStart).Round(time.Millisecond),
 		float64(len(vectors))/1024/1024)
 
-	treeStart := time.Now()
-	log.Printf("building VP-tree over %d references ...", len(labels))
-	tree := buildVPTree(vectors, len(labels))
-	log.Printf("VP-tree ready in %s (%d nodes, %.1f MB)",
-		time.Since(treeStart).Round(time.Millisecond),
-		len(tree),
-		float64(len(tree)*16)/1024/1024)
+	idx := &Index{Constants: constants, vectors: vectors, labels: labels}
 
-	return &Index{Constants: constants, vectors: vectors, labels: labels, tree: tree}, nil
+	switch kind {
+	case KindBrute:
+		log.Printf("using brute force search (no secondary structure)")
+	case KindVP:
+		treeStart := time.Now()
+		log.Printf("building VP-tree over %d references ...", len(labels))
+		idx.tree = buildVPTree(vectors, len(labels))
+		log.Printf("VP-tree ready in %s (%d nodes, %.1f MB)",
+			time.Since(treeStart).Round(time.Millisecond),
+			len(idx.tree),
+			float64(len(idx.tree)*16)/1024/1024)
+	case KindIVF:
+		ivfStart := time.Now()
+		log.Printf("building IVF index (%d centroids, sample=%d, iters=%d, nprobe=%d) ...",
+			defaultNumCentroids, defaultKMeansSampleSize, defaultKMeansIterations, defaultNprobe)
+		idx.ivf = buildIVF(vectors, len(labels),
+			defaultNumCentroids, defaultKMeansIterations, defaultKMeansSampleSize, defaultNprobe)
+		log.Printf("IVF ready in %s (%d centroids, %.1f MB)",
+			time.Since(ivfStart).Round(time.Millisecond),
+			idx.ivf.numCentroids,
+			float64(len(idx.ivf.refOrder)*4+len(idx.ivf.centroids))/1024/1024)
+	default:
+		return nil, fmt.Errorf("unknown index kind: %q", kind)
+	}
+
+	return idx, nil
 }
 
 // Score vectorizes the payload, quantizes it, runs k-NN, and returns
@@ -164,8 +198,12 @@ func (idx *Index) Score(payload *Payload) (approved bool, score float32, err err
 	return approved, score, nil
 }
 
-// topK dispatches to the VP-tree search if available, otherwise to brute force.
+// topK dispatches to the most efficient available search structure:
+// IVF (approximate) → VP-tree (exact) → brute force (exact, fallback).
 func (idx *Index) topK(query [VectorDim]int8) [K]neighbor {
+	if idx.ivf != nil {
+		return idx.ivfTopK(query)
+	}
 	if len(idx.tree) > 0 {
 		return idx.vpTreeTopK(query)
 	}
