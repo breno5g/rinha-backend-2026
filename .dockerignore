@@ -1,0 +1,12 @@
+.git
+.gitignore
+docs
+notes
+test
+resources
+*.md
+LICENSE
+docker-compose.yml
+Dockerfile
+.dockerignore
+infra
