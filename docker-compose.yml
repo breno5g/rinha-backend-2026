@@ -6,6 +6,8 @@ services:
     environment:
       INSTANCE_ID: api1
       PORT: "8080"
+      INDEX_KIND: "${INDEX_KIND:-ivf}"
+      IVF_NPROBE: "${IVF_NPROBE:-}"
     volumes:
       - ./resources:/resources:ro
     networks:
@@ -23,6 +25,8 @@ services:
     environment:
       INSTANCE_ID: api2
       PORT: "8080"
+      INDEX_KIND: "${INDEX_KIND:-ivf}"
+      IVF_NPROBE: "${IVF_NPROBE:-}"
     volumes:
       - ./resources:/resources:ro
     networks:

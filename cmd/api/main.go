@@ -27,9 +27,17 @@ func main() {
 	referencesPath := envOrDefault("REFERENCES_PATH", "/resources/references.json.gz")
 	normalizationPath := envOrDefault("NORMALIZATION_PATH", "/resources/normalization.json")
 	mccRiskPath := envOrDefault("MCC_RISK_PATH", "/resources/mcc_risk.json")
+	indexKind := fraud.IndexKind(envOrDefault("INDEX_KIND", string(fraud.KindIVF)))
+	nprobeOverride := envOrDefault("IVF_NPROBE", "")
 
-	log.Printf("[%s] loading references from %s ...", instance, referencesPath)
-	idx, err := fraud.LoadIndex(referencesPath, normalizationPath, mccRiskPath)
+	log.Printf("[%s] loading references from %s (kind=%s) ...", instance, referencesPath, indexKind)
+	idx, err := fraud.LoadIndex(indexKind, referencesPath, normalizationPath, mccRiskPath)
+	if err == nil && nprobeOverride != "" {
+		if err := idx.SetIVFNprobe(nprobeOverride); err != nil {
+			log.Fatalf("[%s] invalid IVF_NPROBE: %v", instance, err)
+		}
+		log.Printf("[%s] IVF nprobe override: %s", instance, nprobeOverride)
+	}
 	if err != nil {
 		log.Fatalf("[%s] failed to load index: %v", instance, err)
 	}
