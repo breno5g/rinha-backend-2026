@@ -14,17 +14,21 @@ import (
 // termination branch the same way real data would.
 func makeBenchIndex(numReferences int, seed int64) *Index {
 	rng := rand.New(rand.NewSource(seed))
-	vectors := make([]int8, 0, numReferences*VectorDim)
+	vectors := make([]int16, 0, numReferences*physicalStride)
 	labels := make([]uint8, 0, numReferences)
 
 	for i := 0; i < numReferences; i++ {
 		for dim := 0; dim < VectorDim; dim++ {
 			isSentinelDim := dim == 5 || dim == 6
 			if isSentinelDim && rng.Float32() < 0.30 {
-				vectors = append(vectors, sentinelInt8)
+				vectors = append(vectors, sentinelInt16)
 				continue
 			}
-			vectors = append(vectors, int8(rng.Intn(128)))
+			vectors = append(vectors, int16(rng.Intn(128)))
+		}
+		// Zero pad to physicalStride.
+		for pad := VectorDim; pad < physicalStride; pad++ {
+			vectors = append(vectors, 0)
 		}
 		if rng.Float32() < 0.30 {
 			labels = append(labels, labelFraud)
@@ -35,12 +39,13 @@ func makeBenchIndex(numReferences int, seed int64) *Index {
 	return &Index{vectors: vectors, labels: labels}
 }
 
-func makeBenchQuery(seed int64) [VectorDim]int8 {
+func makeBenchQuery(seed int64) [physicalStride]int16 {
 	rng := rand.New(rand.NewSource(seed))
-	var q [VectorDim]int8
-	for dim := range q {
-		q[dim] = int8(rng.Intn(128))
+	var q [physicalStride]int16
+	for dim := 0; dim < VectorDim; dim++ {
+		q[dim] = int16(rng.Intn(128))
 	}
+	// q[VectorDim:physicalStride] stays zero.
 	return q
 }
 

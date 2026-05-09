@@ -15,23 +15,28 @@ const (
 	labelLegit uint8 = 0
 	labelFraud uint8 = 1
 
-	// quantizationScale maps a normalized float in [0, 1] to int8 in [0, 127].
-	// We keep the negative half of int8 reserved for the sentinel below.
-	quantizationScale = 127
+	// quantizationScale maps a normalized float in [0, 1] to int16 in [0, 8192].
+	// Mirrors the .NET implementation: preserves enough precision that distance
+	// ties between similar refs are rare, while still fitting in a single
+	// VPMADDWD lane without overflow (8192² × 14 dims ≈ 939M, well below int32 max).
+	quantizationScale = 8192
 
-	// sentinelInt8 represents "no last_transaction" in quantized space. Sitting
-	// at -128 places the sentinel far outside [0, 127], which preserves the
-	// "outsider" property of the float -1: distances from sentinel to any real
-	// value stay large, exactly like in the float reference implementation.
-	sentinelInt8 int8 = -128
+	// sentinelInt16 represents "no last_transaction" in quantized space. The
+	// negative full-scale value ensures the sentinel sits far outside [0, 8192],
+	// preserving the "outsider" property of the float -1 used in Vectorize.
+	sentinelInt16 int16 = -8192
 )
 
-// Index holds the reference dataset, quantized to int8 for memory and cache wins.
-// Layout is flat: vectors[i*VectorDim : (i+1)*VectorDim] is the i-th reference.
+// Index holds the reference dataset, quantized to int16 for high precision
+// while keeping memory and cache pressure reasonable. Layout is flat with a
+// 16-element (32-byte) stride per ref:
 //
-// At 1 byte per dimension, 3M references occupy ~42 MB (vs ~168 MB for float32).
-// The 4× reduction means more vectors fit in L2/L3 cache during scanning,
-// which is where most of the speedup comes from — not the cheaper arithmetic.
+//	vectors[i*physicalStride : i*physicalStride+VectorDim] is the i-th reference.
+//
+// The trailing 2 lanes of each ref are always zero — they exist so AVX2 can
+// load all 16 int16 with a single VMOVDQU without overrunning into the next
+// reference. At 32 bytes per row, 3M references occupy ~96 MB (vs ~168 MB for
+// float32) and AVX2 reads all 14 dims in one instruction.
 //
 // `tree` is an optional VP-tree that prunes exact search to O(log N) on average.
 // `ivf` is an optional Inverted-File index for approximate search.
@@ -39,7 +44,7 @@ const (
 // When neither is set, Score falls back to brute force.
 type Index struct {
 	Constants *Constants
-	vectors   []int8
+	vectors   []int16
 	labels    []uint8
 	tree      []vpNode
 	ivf       *ivfIndex
@@ -50,23 +55,26 @@ type referenceEntry struct {
 	Label  string    `json:"label"`
 }
 
-// quantize maps a float32 value to its int8 representation. Values in [0, 1]
-// are scaled to [0, 127]. Anything strictly negative is treated as the
+// quantize maps a float32 value to its int16 representation. Values in [0, 1]
+// are scaled to [0, 8192]. Anything strictly negative is treated as the
 // "no-data" sentinel (only -1 appears in practice). Out-of-range positive
-// values are clamped to 127.
-func quantize(f float32) int8 {
+// values are clamped to 8192.
+func quantize(f float32) int16 {
 	if f < 0 {
-		return sentinelInt8
+		return sentinelInt16
 	}
 	if f >= 1 {
 		return quantizationScale
 	}
-	return int8(math.Round(float64(f) * quantizationScale))
+	return int16(math.Round(float64(f) * quantizationScale))
 }
 
-// quantizeVector applies quantize() element-wise.
-func quantizeVector(v [VectorDim]float32) [VectorDim]int8 {
-	var out [VectorDim]int8
+// quantizeVector applies quantize() element-wise and returns a 16-element
+// buffer (14 logical dims + 2 zero pad). The pad lanes are required so AVX2
+// can load all 16 int16 in a single VMOVDQU; their zero value contributes
+// nothing to the squared L2 distance.
+func quantizeVector(v [VectorDim]float32) [physicalStride]int16 {
+	var out [physicalStride]int16
 	for i, value := range v {
 		out[i] = quantize(value)
 	}
@@ -85,7 +93,7 @@ const (
 	KindIVF IndexKind = "ivf"
 )
 
-// LoadIndex reads references.json.gz, quantizes each vector to int8, builds
+// LoadIndex reads references.json.gz, quantizes each vector to int16, builds
 // the requested secondary structure, and returns the ready-to-query Index.
 // It also loads normalization constants and the MCC risk table.
 func LoadIndex(kind IndexKind, referencesGzPath, normalizationPath, mccRiskPath string) (*Index, error) {
@@ -114,7 +122,7 @@ func LoadIndex(kind IndexKind, referencesGzPath, normalizationPath, mccRiskPath 
 	}
 
 	const expectedReferenceCount = 3_000_000
-	vectors := make([]int8, 0, expectedReferenceCount*VectorDim)
+	vectors := make([]int16, 0, expectedReferenceCount*physicalStride)
 	labels := make([]uint8, 0, expectedReferenceCount)
 
 	var entry referenceEntry
@@ -128,6 +136,10 @@ func LoadIndex(kind IndexKind, referencesGzPath, normalizationPath, mccRiskPath 
 		}
 		for _, dimensionValue := range entry.Vector {
 			vectors = append(vectors, quantize(dimensionValue))
+		}
+		// Zero pad to physicalStride so AVX2 loads can read 32 bytes safely.
+		for pad := VectorDim; pad < physicalStride; pad++ {
+			vectors = append(vectors, 0)
 		}
 
 		switch entry.Label {
@@ -181,26 +193,38 @@ func LoadIndex(kind IndexKind, referencesGzPath, normalizationPath, mccRiskPath 
 // Score vectorizes the payload, quantizes it, runs k-NN, and returns
 // `approved` + `fraud_score` per the rules.
 func (idx *Index) Score(payload *Payload) (approved bool, score float32, err error) {
-	queryFloat, err := Vectorize(payload, idx.Constants)
+	count, err := idx.FraudCount(payload)
 	if err != nil {
 		return false, 0, err
 	}
-	queryVector := quantizeVector(queryFloat)
-	top := idx.topK(queryVector)
-	fraudCount := 0
-	for _, n := range top {
-		if n.label == labelFraud {
-			fraudCount++
-		}
-	}
-	score = float32(fraudCount) / float32(K)
+	score = float32(count) / float32(K)
 	approved = score < Threshold
 	return approved, score, nil
 }
 
+// FraudCount returns the number of "fraud"-labeled neighbors among the K
+// nearest references for the given payload. Hot-path callers should use this
+// directly and pick a pre-serialized response — it skips the float division
+// and bool comparison Score wraps around.
+func (idx *Index) FraudCount(payload *Payload) (int, error) {
+	queryFloat, err := Vectorize(payload, idx.Constants)
+	if err != nil {
+		return 0, err
+	}
+	queryVector := quantizeVector(queryFloat)
+	top := idx.topK(queryVector)
+	count := 0
+	for _, n := range top {
+		if n.label == labelFraud {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // topK dispatches to the most efficient available search structure:
 // IVF (approximate) → VP-tree (exact) → brute force (exact, fallback).
-func (idx *Index) topK(query [VectorDim]int8) [K]neighbor {
+func (idx *Index) topK(query [physicalStride]int16) [K]neighbor {
 	if idx.ivf != nil {
 		return idx.ivfTopK(query)
 	}
@@ -221,7 +245,12 @@ type neighbor struct {
 // bruteForceTopK scans every reference and returns the K nearest, sorted
 // ascending by squared L2 distance. Used as a correctness oracle for the
 // VP-tree search and as the fallback when no tree is built.
-func (idx *Index) bruteForceTopK(query [VectorDim]int8) [K]neighbor {
+//
+// The inner distance is computed via l2SquaredDistanceInt16, which dispatches
+// to AVX2 when available. The SIMD kernel processes all 14 dims (16 lanes
+// including pad) in a single VMOVDQU + VPSUBW + VPMADDWD chain, so the per-
+// ref `bound` check is the only early-exit we need.
+func (idx *Index) bruteForceTopK(query [physicalStride]int16) [K]neighbor {
 	// nearestNeighbors stays sorted ascending by distance:
 	//   [0] = closest, [K-1] = K-th closest.
 	var nearestNeighbors [K]neighbor
@@ -229,23 +258,16 @@ func (idx *Index) bruteForceTopK(query [VectorDim]int8) [K]neighbor {
 		nearestNeighbors[slot].squaredDistance = math.MaxInt32
 	}
 	// kthBestDistance is the "admission threshold" into the top-K. Any reference
-	// whose partial distance reaches this value can be skipped without further work.
+	// whose distance is ≥ this can be skipped without further work.
 	kthBestDistance := nearestNeighbors[K-1].squaredDistance
 
+	querySlice := query[:]
 	referenceCount := len(idx.labels)
 	for referenceIndex := 0; referenceIndex < referenceCount; referenceIndex++ {
-		vectorOffset := referenceIndex * VectorDim
+		vectorOffset := referenceIndex * physicalStride
+		refSlice := idx.vectors[vectorOffset : vectorOffset+physicalStride]
 
-		// Accumulate squared L2 dimension-by-dimension. Bail out early if the
-		// partial sum already crosses the admission threshold.
-		var squaredDistance int32
-		for dim := 0; dim < VectorDim; dim++ {
-			diff := int32(query[dim]) - int32(idx.vectors[vectorOffset+dim])
-			squaredDistance += diff * diff
-			if squaredDistance >= kthBestDistance {
-				break
-			}
-		}
+		squaredDistance := l2SquaredDistanceInt16(querySlice, refSlice)
 		if squaredDistance >= kthBestDistance {
 			continue
 		}
@@ -266,7 +288,7 @@ func (idx *Index) bruteForceTopK(query [VectorDim]int8) [K]neighbor {
 // knnFraudCount is a thin wrapper around bruteForceTopK that returns the
 // number of "fraud"-labeled references among the K nearest. Kept for tests
 // and benchmarks that want to exercise the brute-force path.
-func (idx *Index) knnFraudCount(query [VectorDim]int8) int {
+func (idx *Index) knnFraudCount(query [physicalStride]int16) int {
 	top := idx.bruteForceTopK(query)
 	count := 0
 	for _, n := range top {

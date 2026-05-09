@@ -70,14 +70,14 @@ func LoadBinaryMmap(path string, constants *Constants) (*Index, error) {
 	clusterOffsets := unsafe.Slice((*int32)(unsafe.Pointer(&data[offset])), numCentroids+1)
 	offset += (numCentroids + 1) * 4
 
-	vectors := unsafe.Slice((*int8)(unsafe.Pointer(&data[offset])), numRefs*VectorDim)
-	offset += numRefs * VectorDim
+	vectors := unsafe.Slice((*int16)(unsafe.Pointer(&data[offset])), numRefs*physicalStride)
+	offset += numRefs * physicalStride * 2 // 2 bytes per int16 lane
 
 	labels := data[offset : offset+numRefs]
 	offset += numRefs
 
-	centroids := unsafe.Slice((*int8)(unsafe.Pointer(&data[offset])), numCentroids*VectorDim)
-	offset += numCentroids * VectorDim
+	centroids := unsafe.Slice((*int16)(unsafe.Pointer(&data[offset])), numCentroids*physicalStride)
+	offset += numCentroids * physicalStride * 2
 
 	if offset != size {
 		return nil, fmt.Errorf("file size mismatch: parsed %d, file %d", offset, size)

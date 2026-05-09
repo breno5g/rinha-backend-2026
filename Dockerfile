@@ -9,9 +9,11 @@ COPY cmd ./cmd
 COPY internal ./internal
 
 # Build both binaries.
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+# GOAMD64=v3 enables AVX2/BMI2 in code Go itself emits (the asm kernel always
+# uses AVX2; this flag covers everything else).
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v3 \
     go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v3 \
     go build -trimpath -ldflags="-s -w" -o /out/preprocess ./cmd/preprocess
 
 # ---- Preprocess stage: turn the raw references into a ready-to-mmap binary.

@@ -31,7 +31,7 @@ func TestIVF_RecallAcrossNprobe(t *testing.T) {
 	idx := makeBenchIndex(numRefs, 1)
 	idx.ivf = buildIVF(idx.vectors, numRefs, numCentroids, 5, 5_000, 1)
 
-	queries := make([][VectorDim]int8, numQueries)
+	queries := make([][physicalStride]int16, numQueries)
 	for q := range queries {
 		queries[q] = makeBenchQuery(int64(q + 1000))
 	}

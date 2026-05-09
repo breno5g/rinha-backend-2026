@@ -60,14 +60,16 @@ const (
 
 // ivfIndex stores everything needed to do an IVF lookup.
 //
-// Memory profile for 3M refs and 256 centroids:
-//   centroids       :   256 × 14 = 3.5 KB
-//   refOrder        :   3M  × 4  = 12 MB
-//   clusterOffsets  :   257 × 4  = 1 KB
+// Memory profile for 3M refs and 2048 centroids:
+//   centroids       :   2048 × 32 = 64 KB
+//   refOrder        :   3M   × 4  = 12 MB
+//   clusterOffsets  :   2049 × 4  = 8 KB
 //
-// All ~12 MB total — much lighter than the VP-tree's 46 MB.
+// Centroids share the same physicalStride=16 (int16) layout as the main
+// vectors so the AVX2 kernel applies uniformly to both centroid scans and
+// cluster scans.
 type ivfIndex struct {
-	centroids      []int8  // flat: numCentroids × VectorDim
+	centroids      []int16 // flat: numCentroids × physicalStride (14 dims + 2 zero pad)
 	numCentroids   int
 	nprobe         int     // fast/single-stage probe count
 	fullNprobe     int     // expanded probe count for borderline queries (0 disables two-stage)
@@ -77,7 +79,7 @@ type ivfIndex struct {
 
 // buildIVF runs k-means on a sample of `vectors`, assigns every ref to its
 // nearest centroid, and packs the results into an inverted file structure.
-func buildIVF(vectors []int8, numRefs, numCentroids, kMeansIters, sampleSize, nprobe int) *ivfIndex {
+func buildIVF(vectors []int16, numRefs, numCentroids, kMeansIters, sampleSize, nprobe int) *ivfIndex {
 	centroids := initializeCentroids(vectors, numRefs, numCentroids, sampleSize)
 	runKMeansOnSample(vectors, numRefs, centroids, numCentroids, sampleSize, kMeansIters)
 
@@ -95,13 +97,13 @@ func buildIVF(vectors []int8, numRefs, numCentroids, kMeansIters, sampleSize, np
 
 // initializeCentroids picks numCentroids distinct refs at random as the seed
 // centroids. K-means iterations refine these.
-func initializeCentroids(vectors []int8, numRefs, numCentroids, sampleSize int) []int8 {
+func initializeCentroids(vectors []int16, numRefs, numCentroids, sampleSize int) []int16 {
 	if sampleSize > numRefs {
 		sampleSize = numRefs
 	}
 	rng := rand.New(rand.NewSource(42))
 	pickedRefs := make(map[int32]bool, numCentroids)
-	centroids := make([]int8, numCentroids*VectorDim)
+	centroids := make([]int16, numCentroids*physicalStride)
 	for c := 0; c < numCentroids; c++ {
 		var pickedRef int32
 		for {
@@ -111,8 +113,8 @@ func initializeCentroids(vectors []int8, numRefs, numCentroids, sampleSize int) 
 				break
 			}
 		}
-		copy(centroids[c*VectorDim:(c+1)*VectorDim],
-			vectors[int(pickedRef)*VectorDim:(int(pickedRef)+1)*VectorDim])
+		copy(centroids[c*physicalStride:(c+1)*physicalStride],
+			vectors[int(pickedRef)*physicalStride:(int(pickedRef)+1)*physicalStride])
 	}
 	return centroids
 }
@@ -121,7 +123,7 @@ func initializeCentroids(vectors []int8, numRefs, numCentroids, sampleSize int) 
 // of the dataset. Iterating on a sample (not the full 3M) is the only reason
 // build stays fast: the sample is large enough to converge representative
 // centroids, but small enough that O(samples × centroids × dim) is cheap.
-func runKMeansOnSample(vectors []int8, numRefs int, centroids []int8, numCentroids, sampleSize, iters int) {
+func runKMeansOnSample(vectors []int16, numRefs int, centroids []int16, numCentroids, sampleSize, iters int) {
 	if sampleSize > numRefs {
 		sampleSize = numRefs
 	}
@@ -133,7 +135,10 @@ func runKMeansOnSample(vectors []int8, numRefs int, centroids []int8, numCentroi
 	}
 
 	sampleAssignments := make([]int32, sampleSize)
-	dimSums := make([]int64, numCentroids*VectorDim)
+	// dimSums and centroid storage use physicalStride so we can reuse the same
+	// indexing math as the main vectors array. The pad lanes always sum to 0
+	// and divide back to 0, so they harmlessly stay zero across iterations.
+	dimSums := make([]int64, numCentroids*physicalStride)
 	clusterCounts := make([]int32, numCentroids)
 
 	for iter := 0; iter < iters; iter++ {
@@ -152,8 +157,8 @@ func runKMeansOnSample(vectors []int8, numRefs int, centroids []int8, numCentroi
 		for i, refIdx := range sampleIndices {
 			cluster := sampleAssignments[i]
 			clusterCounts[cluster]++
-			refOffset := int(refIdx) * VectorDim
-			centroidOffset := int(cluster) * VectorDim
+			refOffset := int(refIdx) * physicalStride
+			centroidOffset := int(cluster) * physicalStride
 			for d := 0; d < VectorDim; d++ {
 				dimSums[centroidOffset+d] += int64(vectors[refOffset+d])
 			}
@@ -163,15 +168,16 @@ func runKMeansOnSample(vectors []int8, numRefs int, centroids []int8, numCentroi
 				// Empty cluster — re-seed from a random sample ref so we don't
 				// lose this slot for the next iteration.
 				resampledRef := sampleIndices[rng.Intn(len(sampleIndices))]
-				copy(centroids[c*VectorDim:(c+1)*VectorDim],
-					vectors[int(resampledRef)*VectorDim:(int(resampledRef)+1)*VectorDim])
+				copy(centroids[c*physicalStride:(c+1)*physicalStride],
+					vectors[int(resampledRef)*physicalStride:(int(resampledRef)+1)*physicalStride])
 				continue
 			}
-			centroidOffset := c * VectorDim
+			centroidOffset := c * physicalStride
 			count := int64(clusterCounts[c])
 			for d := 0; d < VectorDim; d++ {
-				centroids[centroidOffset+d] = int8(dimSums[centroidOffset+d] / count)
+				centroids[centroidOffset+d] = int16(dimSums[centroidOffset+d] / count)
 			}
+			// Pad lanes stay zero (they were zero, dimSums for them is zero).
 		}
 	}
 }
@@ -179,7 +185,7 @@ func runKMeansOnSample(vectors []int8, numRefs int, centroids []int8, numCentroi
 // assignAllRefs maps every ref to its nearest centroid. This is the most
 // expensive step of the build (numRefs × numCentroids × dim operations) but
 // it's a one-time cost at startup and embarrassingly parallelizable if needed.
-func assignAllRefs(vectors []int8, numRefs int, centroids []int8, numCentroids int) []int32 {
+func assignAllRefs(vectors []int16, numRefs int, centroids []int16, numCentroids int) []int32 {
 	assignments := make([]int32, numRefs)
 	for refIdx := 0; refIdx < numRefs; refIdx++ {
 		assignments[refIdx] = nearestCentroidBruteForce(vectors, int32(refIdx), centroids, numCentroids)
@@ -189,22 +195,17 @@ func assignAllRefs(vectors []int8, numRefs int, centroids []int8, numCentroids i
 
 // nearestCentroidBruteForce returns the index of the centroid closest to the
 // given ref. Used both during k-means iterations (on sample) and final
-// assignment (on the whole dataset).
-func nearestCentroidBruteForce(vectors []int8, refIdx int32, centroids []int8, numCentroids int) int32 {
+// assignment (on the whole dataset). Uses the SIMD kernel via
+// l2SquaredDistanceInt16 — same hot-path as production search.
+func nearestCentroidBruteForce(vectors []int16, refIdx int32, centroids []int16, numCentroids int) int32 {
 	var bestCentroid int32 = 0
 	var bestDistance int32 = math.MaxInt32
-	refOffset := int(refIdx) * VectorDim
+	refOffset := int(refIdx) * physicalStride
+	refSlice := vectors[refOffset : refOffset+physicalStride]
 
 	for c := 0; c < numCentroids; c++ {
-		centroidOffset := c * VectorDim
-		var distance int32
-		for d := 0; d < VectorDim; d++ {
-			diff := int32(vectors[refOffset+d]) - int32(centroids[centroidOffset+d])
-			distance += diff * diff
-			if distance >= bestDistance {
-				break
-			}
-		}
+		centroidOffset := c * physicalStride
+		distance := l2SquaredDistanceInt16(refSlice, centroids[centroidOffset:centroidOffset+physicalStride])
 		if distance < bestDistance {
 			bestDistance = distance
 			bestCentroid = int32(c)
@@ -250,7 +251,7 @@ func buildInvertedLists(assignments []int32, numCentroids int) (refOrder []int32
 // 2 or 3 fraud votes — actually benefit from a wider probe radius. Spending
 // the extra work only when needed cuts the average per-query CPU significantly
 // while keeping the recall high on the cases that matter most.
-func (idx *Index) ivfTopK(query [VectorDim]int8) [K]neighbor {
+func (idx *Index) ivfTopK(query [physicalStride]int16) [K]neighbor {
 	var top [K]neighbor
 	for slot := range top {
 		top[slot].squaredDistance = math.MaxInt32
@@ -279,8 +280,11 @@ func (idx *Index) ivfTopK(query [VectorDim]int8) [K]neighbor {
 // ivfTopKWithNprobe runs a single-pass IVF search with the given probe count.
 // Computes distance to every centroid, picks the top-nprobe nearest, then
 // brute-forces inside those clusters maintaining a top-K with an admission
-// threshold and early termination per ref.
-func (idx *Index) ivfTopKWithNprobe(query [VectorDim]int8, nprobe int) [K]neighbor {
+// threshold per ref.
+//
+// Both the centroid scan and the cluster scan dispatch through
+// l2SquaredDistanceInt16, so AVX2 accelerates every distance computation.
+func (idx *Index) ivfTopKWithNprobe(query [physicalStride]int16, nprobe int) [K]neighbor {
 	var top [K]neighbor
 	for slot := range top {
 		top[slot].squaredDistance = math.MaxInt32
@@ -289,6 +293,7 @@ func (idx *Index) ivfTopKWithNprobe(query [VectorDim]int8, nprobe int) [K]neighb
 		return top
 	}
 	ivf := idx.ivf
+	querySlice := query[:]
 
 	// Step 1: query → all centroids.
 	type centroidDistance struct {
@@ -297,12 +302,8 @@ func (idx *Index) ivfTopKWithNprobe(query [VectorDim]int8, nprobe int) [K]neighb
 	}
 	centroidDistances := make([]centroidDistance, ivf.numCentroids)
 	for c := 0; c < ivf.numCentroids; c++ {
-		centroidOffset := c * VectorDim
-		var distance int32
-		for d := 0; d < VectorDim; d++ {
-			diff := int32(query[d]) - int32(ivf.centroids[centroidOffset+d])
-			distance += diff * diff
-		}
+		centroidOffset := c * physicalStride
+		distance := l2SquaredDistanceInt16(querySlice, ivf.centroids[centroidOffset:centroidOffset+physicalStride])
 		centroidDistances[c] = centroidDistance{int32(c), distance}
 	}
 
@@ -326,16 +327,9 @@ func (idx *Index) ivfTopKWithNprobe(query [VectorDim]int8, nprobe int) [K]neighb
 
 		for cursor := clusterStart; cursor < clusterEnd; cursor++ {
 			refIdx := ivf.refOrder[cursor]
-			refOffset := int(refIdx) * VectorDim
+			refOffset := int(refIdx) * physicalStride
 
-			var distance int32
-			for d := 0; d < VectorDim; d++ {
-				diff := int32(query[d]) - int32(idx.vectors[refOffset+d])
-				distance += diff * diff
-				if distance >= kthBest {
-					break
-				}
-			}
+			distance := l2SquaredDistanceInt16(querySlice, idx.vectors[refOffset:refOffset+physicalStride])
 			if distance >= kthBest {
 				continue
 			}

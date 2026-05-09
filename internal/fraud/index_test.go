@@ -5,15 +5,15 @@ import "testing"
 func TestQuantize(t *testing.T) {
 	cases := []struct {
 		in   float32
-		want int8
+		want int16
 	}{
-		{-1, sentinelInt8},
+		{-1, sentinelInt16},
 		{0, 0},
-		{0.25, 32},  // round(0.25 * 127) = round(31.75) = 32
-		{0.5, 64},   // round(0.5 * 127)  = round(63.5)  = 64 (Go rounds half away from zero)
-		{0.7826, 99}, // matches the legit example dim 3 (0.7826 → ~99)
-		{1, 127},
-		{1.5, 127}, // clamped at the upper bound
+		{0.25, 2048},   // round(0.25 * 8192) = 2048
+		{0.5, 4096},    // round(0.5  * 8192) = 4096
+		{0.7826, 6411}, // round(0.7826 * 8192) ≈ 6411
+		{1, 8192},
+		{1.5, 8192}, // clamped at the upper bound
 	}
 	for _, c := range cases {
 		if got := quantize(c.in); got != c.want {
@@ -26,11 +26,11 @@ func TestQuantizeVector_LegitExample(t *testing.T) {
 	floatVector := [VectorDim]float32{0.0041, 0.1667, 0.05, 0.7826, 0.3333, -1, -1, 0.0292, 0.15, 0, 1, 0, 0.15, 0.006}
 	got := quantizeVector(floatVector)
 
-	if got[5] != sentinelInt8 || got[6] != sentinelInt8 {
+	if got[5] != sentinelInt16 || got[6] != sentinelInt16 {
 		t.Errorf("expected sentinel at dims 5,6; got %d,%d", got[5], got[6])
 	}
-	if got[10] != 127 {
-		t.Errorf("dim 10 (card_present=1) should quantize to 127; got %d", got[10])
+	if got[10] != quantizationScale {
+		t.Errorf("dim 10 (card_present=1) should quantize to %d; got %d", int16(quantizationScale), got[10])
 	}
 	if got[9] != 0 || got[11] != 0 {
 		t.Errorf("dims 9,11 (booleans = 0) should quantize to 0; got %d,%d", got[9], got[11])
@@ -41,13 +41,13 @@ func TestQuantizeVector_LegitExample(t *testing.T) {
 // every reference is fraud, a query must return K fraud votes.
 func TestKNN_SyntheticAllFraud(t *testing.T) {
 	idx := &Index{
-		vectors: make([]int8, 100*VectorDim), // all zeros
+		vectors: make([]int16, 100*physicalStride), // all zeros
 		labels:  make([]uint8, 100),
 	}
 	for i := range idx.labels {
 		idx.labels[i] = labelFraud
 	}
-	var query [VectorDim]int8
+	var query [physicalStride]int16
 	if got := idx.knnFraudCount(query); got != K {
 		t.Errorf("all-fraud dataset should give K=%d fraud votes, got %d", K, got)
 	}
@@ -59,23 +59,24 @@ func TestKNN_SyntheticAllFraud(t *testing.T) {
 func TestKNN_PicksClosestNotJustFirst(t *testing.T) {
 	const numRefs = 20
 	idx := &Index{
-		vectors: make([]int8, numRefs*VectorDim),
+		vectors: make([]int16, numRefs*physicalStride),
 		labels:  make([]uint8, numRefs),
 	}
 	// First K refs: exact match (zeros), labeled legit.
 	for i := 0; i < K; i++ {
 		idx.labels[i] = labelLegit
 	}
-	// Next K refs: far away (all 100s), labeled fraud.
+	// Next K refs: far away (all 100s in the logical dims, pad lanes stay 0),
+	// labeled fraud.
 	for i := K; i < 2*K; i++ {
 		for dim := 0; dim < VectorDim; dim++ {
-			idx.vectors[i*VectorDim+dim] = 100
+			idx.vectors[i*physicalStride+dim] = 100
 		}
 		idx.labels[i] = labelFraud
 	}
 	// Remaining: don't matter.
 
-	var query [VectorDim]int8 // zeros — exact match for the first K refs
+	var query [physicalStride]int16 // zeros — exact match for the first K refs
 	if got := idx.knnFraudCount(query); got != 0 {
 		t.Errorf("query should match the K legit refs, got %d fraud votes", got)
 	}

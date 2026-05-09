@@ -11,6 +11,13 @@ const (
 	VectorDim = 14
 	K         = 5
 	Threshold = 0.6
+
+	// physicalStride is the on-disk and in-memory stride per reference vector.
+	// We pad the 14 logical dims to 16 bytes so AVX2 can load a whole reference
+	// with a single VPMOVSXBW (16 int8 → 16 int16) without overrunning into the
+	// next reference. The trailing 2 bytes are always zero, so they contribute
+	// nothing to the squared L2 distance.
+	physicalStride = 16
 )
 
 type Payload struct {

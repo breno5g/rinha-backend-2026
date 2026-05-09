@@ -24,7 +24,7 @@ type vpNode struct {
 // Build cost is O(N log N): at each level, every still-unassigned ref is
 // distance-checked against the local vantage, then sorted by that distance
 // to find the median radius.
-func buildVPTree(vectors []int8, numRefs int) []vpNode {
+func buildVPTree(vectors []int16, numRefs int) []vpNode {
 	if numRefs == 0 {
 		return nil
 	}
@@ -98,28 +98,21 @@ func buildVPTree(vectors []int8, numRefs int) []vpNode {
 }
 
 // squaredDistanceBetweenRefs computes the squared L2 distance between two
-// reference vectors stored in the flat int8 array.
-func squaredDistanceBetweenRefs(vectors []int8, a, b int32) int32 {
-	var dist int32
-	baseA := int(a) * VectorDim
-	baseB := int(b) * VectorDim
-	for d := 0; d < VectorDim; d++ {
-		diff := int32(vectors[baseA+d]) - int32(vectors[baseB+d])
-		dist += diff * diff
-	}
-	return dist
+// reference vectors stored in the flat int16 array.
+func squaredDistanceBetweenRefs(vectors []int16, a, b int32) int32 {
+	baseA := int(a) * physicalStride
+	baseB := int(b) * physicalStride
+	return l2SquaredDistanceInt16(
+		vectors[baseA:baseA+physicalStride],
+		vectors[baseB:baseB+physicalStride],
+	)
 }
 
 // squaredDistanceQueryRef computes the squared L2 distance from a query vector
-// (passed by value) to the b-th reference in the flat int8 array.
-func squaredDistanceQueryRef(vectors []int8, query [VectorDim]int8, b int32) int32 {
-	var dist int32
-	baseB := int(b) * VectorDim
-	for d := 0; d < VectorDim; d++ {
-		diff := int32(query[d]) - int32(vectors[baseB+d])
-		dist += diff * diff
-	}
-	return dist
+// (passed by value) to the b-th reference in the flat int16 array.
+func squaredDistanceQueryRef(vectors []int16, query [physicalStride]int16, b int32) int32 {
+	baseB := int(b) * physicalStride
+	return l2SquaredDistanceInt16(query[:], vectors[baseB:baseB+physicalStride])
 }
 
 // vpTreeTopK finds the K nearest references to `query` by traversing the
@@ -137,7 +130,7 @@ func squaredDistanceQueryRef(vectors []int8, query [VectorDim]int8, b int32) int
 //
 // We descend into the side containing the query first because that side is
 // likely to tighten `tau`, which then prunes the other side more aggressively.
-func (idx *Index) vpTreeTopK(query [VectorDim]int8) [K]neighbor {
+func (idx *Index) vpTreeTopK(query [physicalStride]int16) [K]neighbor {
 	var top [K]neighbor
 	for slot := range top {
 		top[slot].squaredDistance = math.MaxInt32
