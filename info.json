@@ -1,7 +1,14 @@
 {
-    "participants": ["Breno Santos"],
-    "social": ["https://github.com/breno5g"],
+    "participants": [
+        "Breno Santos"
+    ],
+    "social": [
+        "https://github.com/breno5g"
+    ],
     "source-code-repo": "https://github.com/breno5g/rinha-backend-2026",
-    "stack": ["go", "nginx"],
-    "open_to_work": false
+    "stack": [
+        "go",
+        "nginx"
+    ],
+    "open_to_work": true
 }
