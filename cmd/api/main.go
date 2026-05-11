@@ -23,7 +23,9 @@ var payloadPool = sync.Pool{
 }
 
 func resetPayload(p *fraud.Payload) {
+	knownMerchants := p.Customer.KnownMerchants[:0]
 	*p = fraud.Payload{}
+	p.Customer.KnownMerchants = knownMerchants
 }
 
 func buildResponses() {

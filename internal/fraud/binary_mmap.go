@@ -6,10 +6,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
+
+const prefaultPageSize = 4096
 
 func LoadBinaryMmap(path string, constants *Constants) (*Index, error) {
 	file, err := os.Open(path)
@@ -32,6 +35,8 @@ func LoadBinaryMmap(path string, constants *Constants) (*Index, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mmap: %w", err)
 	}
+
+	prefaultMmap(data)
 
 	header := &binaryHeader{
 		Magic:         binary.LittleEndian.Uint32(data[0:4]),
@@ -72,4 +77,16 @@ func LoadBinaryMmap(path string, constants *Constants) (*Index, error) {
 	}
 
 	return assembleIndex(constants, header, vectors, labels, centroids, refOrder, clusterOffsets), nil
+}
+
+func prefaultMmap(data []byte) {
+	_ = unix.Madvise(data, unix.MADV_WILLNEED)
+	var sink byte
+	for offset := 0; offset < len(data); offset += prefaultPageSize {
+		sink ^= data[offset]
+	}
+	if len(data) > 0 {
+		sink ^= data[len(data)-1]
+	}
+	runtime.KeepAlive(sink)
 }

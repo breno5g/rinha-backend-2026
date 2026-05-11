@@ -4,9 +4,22 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"sort"
+	"slices"
 	"strconv"
+	"sync"
 )
+
+type centroidDistance struct {
+	clusterIdx int32
+	distance   int32
+}
+
+var centroidScratchPool = sync.Pool{
+	New: func() any {
+		s := make([]centroidDistance, 0, defaultNumCentroids)
+		return &s
+	},
+}
 
 func (idx *Index) SetIVFNprobe(value string) error {
 	if idx.ivf == nil {
@@ -227,19 +240,26 @@ func (idx *Index) ivfTopKWithNprobe(query [physicalStride]int16, nprobe int) [K]
 	ivf := idx.ivf
 	querySlice := query[:]
 
-	type centroidDistance struct {
-		clusterIdx int32
-		distance   int32
+	scratchPtr := centroidScratchPool.Get().(*[]centroidDistance)
+	centroidDistances := *scratchPtr
+	if cap(centroidDistances) < ivf.numCentroids {
+		centroidDistances = make([]centroidDistance, ivf.numCentroids)
+	} else {
+		centroidDistances = centroidDistances[:ivf.numCentroids]
 	}
-	centroidDistances := make([]centroidDistance, ivf.numCentroids)
+	defer func() {
+		*scratchPtr = centroidDistances[:0]
+		centroidScratchPool.Put(scratchPtr)
+	}()
+
 	for c := 0; c < ivf.numCentroids; c++ {
 		centroidOffset := c * physicalStride
 		distance := l2SquaredDistanceInt16(querySlice, ivf.centroids[centroidOffset:centroidOffset+physicalStride])
 		centroidDistances[c] = centroidDistance{int32(c), distance}
 	}
 
-	sort.Slice(centroidDistances, func(i, j int) bool {
-		return centroidDistances[i].distance < centroidDistances[j].distance
+	slices.SortFunc(centroidDistances, func(a, b centroidDistance) int {
+		return int(a.distance - b.distance)
 	})
 
 	probesToScan := nprobe
