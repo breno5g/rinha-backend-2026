@@ -11,23 +11,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// LoadBinaryMmap maps the index file into the process address space and
-// builds an Index whose slices point directly into the mapped region.
-// No copies are made for the bulk arrays.
-//
-// Two API instances on the same host both calling LoadBinaryMmap on the
-// same file share the same kernel page cache: the physical memory holding
-// the index is allocated once, regardless of how many readers there are.
-// That's the entire point of using mmap here.
-//
-// The returned Index borrows from the mmap region; tearing it down is
-// out of scope (process lifetime).
 func LoadBinaryMmap(path string, constants *Constants) (*Index, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	// We can close the fd after mmap; the kernel keeps the mapping alive.
+
 	defer file.Close()
 
 	stat, err := file.Stat()
@@ -44,7 +33,6 @@ func LoadBinaryMmap(path string, constants *Constants) (*Index, error) {
 		return nil, fmt.Errorf("mmap: %w", err)
 	}
 
-	// The header is little-endian fields packed as written by encoding/binary.
 	header := &binaryHeader{
 		Magic:         binary.LittleEndian.Uint32(data[0:4]),
 		Version:       binary.LittleEndian.Uint32(data[4:8]),
@@ -71,7 +59,7 @@ func LoadBinaryMmap(path string, constants *Constants) (*Index, error) {
 	offset += (numCentroids + 1) * 4
 
 	vectors := unsafe.Slice((*int16)(unsafe.Pointer(&data[offset])), numRefs*physicalStride)
-	offset += numRefs * physicalStride * 2 // 2 bytes per int16 lane
+	offset += numRefs * physicalStride * 2
 
 	labels := data[offset : offset+numRefs]
 	offset += numRefs

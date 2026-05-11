@@ -5,9 +5,6 @@ import (
 	"testing"
 )
 
-// TestBinaryRoundtrip serializes an IVF index, reads it back, and verifies
-// every vector field is identical and the search returns the same top-K
-// for a sample of queries. Catches layout/endianness/offset mistakes.
 func TestBinaryRoundtrip(t *testing.T) {
 	const numRefs = 5_000
 	const numCentroids = 32
@@ -26,7 +23,6 @@ func TestBinaryRoundtrip(t *testing.T) {
 		t.Fatalf("LoadBinary: %v", err)
 	}
 
-	// Field-by-field comparison.
 	if got, want := len(loaded.vectors), len(original.vectors); got != want {
 		t.Fatalf("vectors len: got %d, want %d", got, want)
 	}
@@ -62,7 +58,6 @@ func TestBinaryRoundtrip(t *testing.T) {
 		}
 	}
 
-	// Search-equivalence sanity: 10 queries must return identical top-K.
 	for q := 0; q < 10; q++ {
 		query := makeBenchQuery(int64(q + 50))
 		originalTop := original.ivfTopK(query)

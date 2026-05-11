@@ -14,22 +14,10 @@ import (
 	"github.com/breno5g/rinha-2026/internal/fraud"
 )
 
-// precomputedResponses holds the 6 possible HTTP response bodies (one per
-// fraud-vote count 0..5). Each is the JSON {"approved":bool,"fraud_score":float}
-// already serialized into a byte slice. The hot path picks slot[count] and
-// writes it directly — zero allocation, zero serialization.
 var precomputedResponses [fraud.K + 1][]byte
 
-// failSoftResponse is returned whenever the request would otherwise produce
-// an HTTP 5xx. The Rinha scoring formula weights HTTP errors 5× heavier than
-// detection errors (E = 1·FP + 3·FN + 5·Err) AND counts them toward the 15%
-// failure-rate cut, so it's strictly cheaper to misclassify than to crash.
 var failSoftResponse []byte
 
-// payloadPool reuses fraud.Payload structs across requests. Decode resets all
-// scalar fields, but slices and the LastTransaction pointer must be cleared
-// explicitly before returning to the pool so stale data can't leak between
-// requests.
 var payloadPool = sync.Pool{
 	New: func() any { return new(fraud.Payload) },
 }
@@ -51,7 +39,7 @@ func buildResponses() {
 		}
 		precomputedResponses[count] = buf
 	}
-	// Fail-soft is "approved=true, fraud_score=0" — same as count=0.
+
 	failSoftResponse = precomputedResponses[0]
 }
 
@@ -71,9 +59,6 @@ func envBool(key string) bool {
 	return b
 }
 
-// loadIndex picks the cheapest available source: a pre-built binary (mmap if
-// requested) → references.json.gz fallback. The binary path comes from
-// INDEX_BINARY; mmap is enabled by INDEX_MMAP=true.
 func loadIndex(instance string) (*fraud.Index, error) {
 	binaryPath := os.Getenv("INDEX_BINARY")
 	useMmap := envBool("INDEX_MMAP")
@@ -111,20 +96,15 @@ func loadIndex(instance string) (*fraud.Index, error) {
 	return fraud.LoadIndex(indexKind, referencesPath, normalizationPath, mccRiskPath)
 }
 
-// listen binds the HTTP server: Unix domain socket if SOCKET_PATH is set
-// (matches the .NET reference layout — nginx upstream uses unix:/run/sock/api1.sock),
-// otherwise TCP on PORT. Unix sockets remove the loopback TCP overhead,
-// which dominates p99 once the search itself drops below ~400µs.
 func listen(instance string) (net.Listener, string, error) {
 	if socket := os.Getenv("SOCKET_PATH"); socket != "" {
-		// Remove any stale socket from a previous crash so Listen succeeds.
+
 		_ = os.Remove(socket)
 		ln, err := net.Listen("unix", socket)
 		if err != nil {
 			return nil, "", fmt.Errorf("listen unix %s: %w", socket, err)
 		}
-		// nginx (running in a sibling container) needs to reach this socket
-		// through the shared /run/sock volume — it must be world-readable.
+
 		if err := os.Chmod(socket, 0o666); err != nil {
 			ln.Close()
 			return nil, "", fmt.Errorf("chmod %s: %w", socket, err)
@@ -171,9 +151,7 @@ func main() {
 	}
 
 	fraudScore := func(w http.ResponseWriter, r *http.Request) {
-		// fail-soft: any panic in vectorize/score becomes a fast 200 OK with
-		// the precomputed "approved" body. Costs at most 1 FP / 3 FN; way
-		// cheaper than a 5xx (5 in the error formula + 15% cut).
+
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				log.Printf("[%s] handler panic recovered: %v", instance, recovered)

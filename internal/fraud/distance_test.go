@@ -5,9 +5,6 @@ import (
 	"testing"
 )
 
-// TestL2SquaredDistance_KernelMatchesScalar runs random pairs through both
-// the dispatched (possibly SIMD) kernel and the scalar reference and checks
-// they agree. Safety net for any future asm changes.
 func TestL2SquaredDistance_KernelMatchesScalar(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	for trial := 0; trial < 1000; trial++ {
@@ -17,7 +14,6 @@ func TestL2SquaredDistance_KernelMatchesScalar(t *testing.T) {
 			query[d] = int16(rng.Intn(quantizationScale + 1))
 			ref[d] = int16(rng.Intn(quantizationScale + 1))
 		}
-		// Pad lanes (14, 15) stay zero.
 
 		got := l2SquaredDistanceInt16(query, ref)
 		want := l2SquaredDistanceInt16Scalar(query, ref)
@@ -28,9 +24,6 @@ func TestL2SquaredDistance_KernelMatchesScalar(t *testing.T) {
 	}
 }
 
-// TestL2SquaredDistance_PadIsIgnored verifies that the SIMD kernel reading
-// pad lanes 14,15 produces the same result as the scalar (which only reads
-// VectorDim=14). With both buffers zero-padded the answer must match.
 func TestL2SquaredDistance_PadIsIgnored(t *testing.T) {
 	query := make([]int16, physicalStride)
 	ref := make([]int16, physicalStride)
@@ -44,9 +37,6 @@ func TestL2SquaredDistance_PadIsIgnored(t *testing.T) {
 	}
 }
 
-// TestL2SquaredDistance_SentinelMagnitude verifies that a sentinel-value lane
-// dominates the distance, matching the design intent: a "no last_transaction"
-// query against a real ref should return a huge distance, not a near-zero.
 func TestL2SquaredDistance_SentinelMagnitude(t *testing.T) {
 	query := make([]int16, physicalStride)
 	ref := make([]int16, physicalStride)
@@ -57,7 +47,7 @@ func TestL2SquaredDistance_SentinelMagnitude(t *testing.T) {
 	if got != want {
 		t.Fatalf("sentinel: kernel=%d scalar=%d", got, want)
 	}
-	// Diff = -8192 - 100 = -8292; squared = 68,757,264
+
 	if got < 60_000_000 {
 		t.Fatalf("sentinel produced unexpectedly small distance: %d", got)
 	}

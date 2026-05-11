@@ -9,11 +9,11 @@ func TestQuantize(t *testing.T) {
 	}{
 		{-1, sentinelInt16},
 		{0, 0},
-		{0.25, 2048},   // round(0.25 * 8192) = 2048
-		{0.5, 4096},    // round(0.5  * 8192) = 4096
-		{0.7826, 6411}, // round(0.7826 * 8192) ≈ 6411
+		{0.25, 2048},
+		{0.5, 4096},
+		{0.7826, 6411},
 		{1, 8192},
-		{1.5, 8192}, // clamped at the upper bound
+		{1.5, 8192},
 	}
 	for _, c := range cases {
 		if got := quantize(c.in); got != c.want {
@@ -37,11 +37,9 @@ func TestQuantizeVector_LegitExample(t *testing.T) {
 	}
 }
 
-// TestKNN_SyntheticAllFraud sanity-checks the KNN: in a tiny dataset where
-// every reference is fraud, a query must return K fraud votes.
 func TestKNN_SyntheticAllFraud(t *testing.T) {
 	idx := &Index{
-		vectors: make([]int16, 100*physicalStride), // all zeros
+		vectors: make([]int16, 100*physicalStride),
 		labels:  make([]uint8, 100),
 	}
 	for i := range idx.labels {
@@ -53,30 +51,25 @@ func TestKNN_SyntheticAllFraud(t *testing.T) {
 	}
 }
 
-// TestKNN_PicksClosestNotJustFirst verifies the algorithm doesn't simply pick
-// the first K references. We place K legit refs as exact matches first, then
-// K fraud refs further away — the legit refs must win.
 func TestKNN_PicksClosestNotJustFirst(t *testing.T) {
 	const numRefs = 20
 	idx := &Index{
 		vectors: make([]int16, numRefs*physicalStride),
 		labels:  make([]uint8, numRefs),
 	}
-	// First K refs: exact match (zeros), labeled legit.
+
 	for i := 0; i < K; i++ {
 		idx.labels[i] = labelLegit
 	}
-	// Next K refs: far away (all 100s in the logical dims, pad lanes stay 0),
-	// labeled fraud.
+
 	for i := K; i < 2*K; i++ {
 		for dim := 0; dim < VectorDim; dim++ {
 			idx.vectors[i*physicalStride+dim] = 100
 		}
 		idx.labels[i] = labelFraud
 	}
-	// Remaining: don't matter.
 
-	var query [physicalStride]int16 // zeros — exact match for the first K refs
+	var query [physicalStride]int16
 	if got := idx.knnFraudCount(query); got != 0 {
 		t.Errorf("query should match the K legit refs, got %d fraud votes", got)
 	}

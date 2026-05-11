@@ -1,13 +1,3 @@
-// preprocess builds the IVF index from the raw references.json.gz at build
-// time and serializes it into a single binary file (~57 MB). The runtime
-// container then loads that binary in <1s instead of paying the ~35s of
-// gzip + JSON parse + k-means + assignment we'd otherwise face on every cold start.
-//
-// Usage:
-//   preprocess --in /resources --out /build/index.bin
-//
-// All paths are required; the tool is meant to run in a Dockerfile build stage,
-// not interactively.
 package main
 
 import (

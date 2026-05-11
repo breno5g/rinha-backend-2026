@@ -8,8 +8,6 @@ import (
 	"strconv"
 )
 
-// SetIVFNprobe overrides the configured nprobe at runtime. Returns an error
-// when the index has no IVF structure or when the value is out of range.
 func (idx *Index) SetIVFNprobe(value string) error {
 	if idx.ivf == nil {
 		return fmt.Errorf("IVF index is not built; cannot tune nprobe")
@@ -22,9 +20,6 @@ func (idx *Index) SetIVFNprobe(value string) error {
 	return nil
 }
 
-// SetIVFFullNprobe configures the second-pass probe count for two-stage search.
-// Set to 0 (or any value ≤ nprobe) to disable two-stage and always use the
-// fast pass.
 func (idx *Index) SetIVFFullNprobe(value string) error {
 	if idx.ivf == nil {
 		return fmt.Errorf("IVF index is not built; cannot tune fullNprobe")
@@ -37,20 +32,6 @@ func (idx *Index) SetIVFFullNprobe(value string) error {
 	return nil
 }
 
-// IVF (Inverted File) index parameters.
-//
-// numCentroids — how finely we partition the space. Standard rule of thumb is
-// √N ≈ 1700 for 3M points; we use a smaller value here because k-means cost
-// scales linearly with this number and we want a tractable startup time.
-//
-// nprobe — how many of the nearest centroids we actually scan at query time.
-// Tunes the recall × latency trade-off:
-//
-//   nprobe = 1   →  fastest, lowest recall
-//   nprobe = 32  →  slower, near-perfect recall
-//
-// kMeansSampleSize / kMeansIterations control build cost. K-means runs on a
-// random sample (cheap), then we assign every ref to its nearest centroid.
 const (
 	defaultNumCentroids     = 2048
 	defaultNprobe           = 8
@@ -58,27 +39,15 @@ const (
 	defaultKMeansIterations = 12
 )
 
-// ivfIndex stores everything needed to do an IVF lookup.
-//
-// Memory profile for 3M refs and 2048 centroids:
-//   centroids       :   2048 × 32 = 64 KB
-//   refOrder        :   3M   × 4  = 12 MB
-//   clusterOffsets  :   2049 × 4  = 8 KB
-//
-// Centroids share the same physicalStride=16 (int16) layout as the main
-// vectors so the AVX2 kernel applies uniformly to both centroid scans and
-// cluster scans.
 type ivfIndex struct {
-	centroids      []int16 // flat: numCentroids × physicalStride (14 dims + 2 zero pad)
+	centroids      []int16
 	numCentroids   int
-	nprobe         int     // fast/single-stage probe count
-	fullNprobe     int     // expanded probe count for borderline queries (0 disables two-stage)
-	refOrder       []int32 // refs reordered by cluster
-	clusterOffsets []int32 // length = numCentroids+1; cluster c spans refOrder[clusterOffsets[c]:clusterOffsets[c+1]]
+	nprobe         int
+	fullNprobe     int
+	refOrder       []int32
+	clusterOffsets []int32
 }
 
-// buildIVF runs k-means on a sample of `vectors`, assigns every ref to its
-// nearest centroid, and packs the results into an inverted file structure.
 func buildIVF(vectors []int16, numRefs, numCentroids, kMeansIters, sampleSize, nprobe int) *ivfIndex {
 	centroids := initializeCentroids(vectors, numRefs, numCentroids, sampleSize)
 	runKMeansOnSample(vectors, numRefs, centroids, numCentroids, sampleSize, kMeansIters)
@@ -95,8 +64,6 @@ func buildIVF(vectors []int16, numRefs, numCentroids, kMeansIters, sampleSize, n
 	}
 }
 
-// initializeCentroids picks numCentroids distinct refs at random as the seed
-// centroids. K-means iterations refine these.
 func initializeCentroids(vectors []int16, numRefs, numCentroids, sampleSize int) []int16 {
 	if sampleSize > numRefs {
 		sampleSize = numRefs
@@ -119,10 +86,6 @@ func initializeCentroids(vectors []int16, numRefs, numCentroids, sampleSize int)
 	return centroids
 }
 
-// runKMeansOnSample iterates the standard k-means loop on a random sample
-// of the dataset. Iterating on a sample (not the full 3M) is the only reason
-// build stays fast: the sample is large enough to converge representative
-// centroids, but small enough that O(samples × centroids × dim) is cheap.
 func runKMeansOnSample(vectors []int16, numRefs int, centroids []int16, numCentroids, sampleSize, iters int) {
 	if sampleSize > numRefs {
 		sampleSize = numRefs
@@ -135,19 +98,16 @@ func runKMeansOnSample(vectors []int16, numRefs int, centroids []int16, numCentr
 	}
 
 	sampleAssignments := make([]int32, sampleSize)
-	// dimSums and centroid storage use physicalStride so we can reuse the same
-	// indexing math as the main vectors array. The pad lanes always sum to 0
-	// and divide back to 0, so they harmlessly stay zero across iterations.
+
 	dimSums := make([]int64, numCentroids*physicalStride)
 	clusterCounts := make([]int32, numCentroids)
 
 	for iter := 0; iter < iters; iter++ {
-		// Assign step: every sample ref → nearest centroid.
+
 		for i, refIdx := range sampleIndices {
 			sampleAssignments[i] = nearestCentroidBruteForce(vectors, refIdx, centroids, numCentroids)
 		}
 
-		// Update step: each centroid becomes the mean of its assigned refs.
 		for i := range dimSums {
 			dimSums[i] = 0
 		}
@@ -165,8 +125,7 @@ func runKMeansOnSample(vectors []int16, numRefs int, centroids []int16, numCentr
 		}
 		for c := 0; c < numCentroids; c++ {
 			if clusterCounts[c] == 0 {
-				// Empty cluster — re-seed from a random sample ref so we don't
-				// lose this slot for the next iteration.
+
 				resampledRef := sampleIndices[rng.Intn(len(sampleIndices))]
 				copy(centroids[c*physicalStride:(c+1)*physicalStride],
 					vectors[int(resampledRef)*physicalStride:(int(resampledRef)+1)*physicalStride])
@@ -177,14 +136,11 @@ func runKMeansOnSample(vectors []int16, numRefs int, centroids []int16, numCentr
 			for d := 0; d < VectorDim; d++ {
 				centroids[centroidOffset+d] = int16(dimSums[centroidOffset+d] / count)
 			}
-			// Pad lanes stay zero (they were zero, dimSums for them is zero).
+
 		}
 	}
 }
 
-// assignAllRefs maps every ref to its nearest centroid. This is the most
-// expensive step of the build (numRefs × numCentroids × dim operations) but
-// it's a one-time cost at startup and embarrassingly parallelizable if needed.
 func assignAllRefs(vectors []int16, numRefs int, centroids []int16, numCentroids int) []int32 {
 	assignments := make([]int32, numRefs)
 	for refIdx := 0; refIdx < numRefs; refIdx++ {
@@ -193,10 +149,6 @@ func assignAllRefs(vectors []int16, numRefs int, centroids []int16, numCentroids
 	return assignments
 }
 
-// nearestCentroidBruteForce returns the index of the centroid closest to the
-// given ref. Used both during k-means iterations (on sample) and final
-// assignment (on the whole dataset). Uses the SIMD kernel via
-// l2SquaredDistanceInt16 — same hot-path as production search.
 func nearestCentroidBruteForce(vectors []int16, refIdx int32, centroids []int16, numCentroids int) int32 {
 	var bestCentroid int32 = 0
 	var bestDistance int32 = math.MaxInt32
@@ -214,9 +166,6 @@ func nearestCentroidBruteForce(vectors []int16, refIdx int32, centroids []int16,
 	return bestCentroid
 }
 
-// buildInvertedLists rearranges refs so that all refs assigned to cluster c
-// occupy a contiguous range refOrder[clusterOffsets[c]:clusterOffsets[c+1]].
-// This lets the search loop scan a cluster as a tight, cache-friendly range.
 func buildInvertedLists(assignments []int32, numCentroids int) (refOrder []int32, clusterOffsets []int32) {
 	clusterCounts := make([]int32, numCentroids)
 	for _, c := range assignments {
@@ -241,16 +190,6 @@ func buildInvertedLists(assignments []int32, numCentroids int) (refOrder []int32
 	return refOrder, clusterOffsets
 }
 
-// ivfTopK is the public k-NN entry point. If `fullNprobe` is configured and
-// the cheap pass returns a borderline result (2 or 3 fraud votes among top-K),
-// it re-runs with the larger probe budget to confirm. Otherwise it returns
-// the fast result directly.
-//
-// Why two-stage: most queries are clearly fraud (5/0 votes) or clearly legit
-// (0/5). Only the ~20-30% borderline queries — where the fast pass returns
-// 2 or 3 fraud votes — actually benefit from a wider probe radius. Spending
-// the extra work only when needed cuts the average per-query CPU significantly
-// while keeping the recall high on the cases that matter most.
 func (idx *Index) ivfTopK(query [physicalStride]int16) [K]neighbor {
 	var top [K]neighbor
 	for slot := range top {
@@ -270,20 +209,13 @@ func (idx *Index) ivfTopK(query [physicalStride]int16) [K]neighbor {
 			fraudVotes++
 		}
 	}
-	// 0/1 → clearly legit; 4/5 → clearly fraud. 2/3 is the gray zone.
+
 	if fraudVotes <= 1 || fraudVotes >= 4 {
 		return fast
 	}
 	return idx.ivfTopKWithNprobe(query, idx.ivf.fullNprobe)
 }
 
-// ivfTopKWithNprobe runs a single-pass IVF search with the given probe count.
-// Computes distance to every centroid, picks the top-nprobe nearest, then
-// brute-forces inside those clusters maintaining a top-K with an admission
-// threshold per ref.
-//
-// Both the centroid scan and the cluster scan dispatch through
-// l2SquaredDistanceInt16, so AVX2 accelerates every distance computation.
 func (idx *Index) ivfTopKWithNprobe(query [physicalStride]int16, nprobe int) [K]neighbor {
 	var top [K]neighbor
 	for slot := range top {
@@ -295,7 +227,6 @@ func (idx *Index) ivfTopKWithNprobe(query [physicalStride]int16, nprobe int) [K]
 	ivf := idx.ivf
 	querySlice := query[:]
 
-	// Step 1: query → all centroids.
 	type centroidDistance struct {
 		clusterIdx int32
 		distance   int32
@@ -307,8 +238,6 @@ func (idx *Index) ivfTopKWithNprobe(query [physicalStride]int16, nprobe int) [K]
 		centroidDistances[c] = centroidDistance{int32(c), distance}
 	}
 
-	// Step 2: pick top-nprobe nearest centroids. Full sort is fine since
-	// numCentroids is small (≤4096).
 	sort.Slice(centroidDistances, func(i, j int) bool {
 		return centroidDistances[i].distance < centroidDistances[j].distance
 	})
@@ -318,7 +247,6 @@ func (idx *Index) ivfTopKWithNprobe(query [physicalStride]int16, nprobe int) [K]
 		probesToScan = ivf.numCentroids
 	}
 
-	// Step 3: scan refs inside the chosen clusters.
 	kthBest := top[K-1].squaredDistance
 	for probe := 0; probe < probesToScan; probe++ {
 		cluster := centroidDistances[probe].clusterIdx
