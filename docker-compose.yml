@@ -4,7 +4,7 @@ services:
     environment:
       INSTANCE_ID: api1
       SOCKET_PATH: /run/sock/api1.sock
-      GOMEMLIMIT: 140MiB
+      GOMEMLIMIT: 130MiB
       GOGC: "200"
       GC_MODE: "off"
       IVF_NPROBE: "${IVF_NPROBE:-}"
@@ -16,15 +16,15 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: "160MB"
+          cpus: "0.43"
+          memory: "154MB"
 
   api2:
     image: breno5g/rinha-fraud-api:latest
     environment:
       INSTANCE_ID: api2
       SOCKET_PATH: /run/sock/api2.sock
-      GOMEMLIMIT: 140MiB
+      GOMEMLIMIT: 130MiB
       GOGC: "200"
       GC_MODE: "off"
       IVF_NPROBE: "${IVF_NPROBE:-}"
@@ -38,8 +38,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: "160MB"
+          cpus: "0.43"
+          memory: "154MB"
 
   load-balancer:
     image: nginx:1.27-alpine
@@ -73,6 +73,12 @@ services:
       - load-balancer
     networks:
       - rinha
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.04"
+          memory: "12MB"
 
 networks:
   rinha:
