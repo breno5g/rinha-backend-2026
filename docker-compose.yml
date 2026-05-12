@@ -43,9 +43,9 @@ services:
           memory: "160MB"
 
   load-balancer:
-    image: nginx:1.27-alpine
+    image: haproxy:2.9-alpine
     volumes:
-      - ./infra/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
       - sock:/run/sock
     ports:
       - "9999:9999"

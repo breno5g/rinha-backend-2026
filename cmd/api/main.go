@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/breno5g/rinha-2026/internal/fraud"
+	"github.com/valyala/fasthttp"
 )
 
 var precomputedResponses [fraud.K + 1][]byte
@@ -23,7 +23,9 @@ var payloadPool = sync.Pool{
 }
 
 func resetPayload(p *fraud.Payload) {
+	knownMerchants := p.Customer.KnownMerchants[:0]
 	*p = fraud.Payload{}
+	p.Customer.KnownMerchants = knownMerchants
 }
 
 func buildResponses() {
@@ -121,6 +123,62 @@ func listen(instance string) (net.Listener, string, error) {
 	return ln, ":" + port, nil
 }
 
+func pathEquals(b []byte, s string) bool {
+	if len(b) != len(s) {
+		return false
+	}
+	for i := 0; i < len(b); i++ {
+		if b[i] != s[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func buildHandler(idx *fraud.Index, instance string) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		path := ctx.Path()
+		switch {
+		case pathEquals(path, "/fraud-score"):
+			if !ctx.IsPost() {
+				ctx.SetStatusCode(fasthttp.StatusMethodNotAllowed)
+				return
+			}
+
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					log.Printf("[%s] handler panic recovered: %v", instance, recovered)
+					ctx.Response.SetBodyRaw(failSoftResponse)
+				}
+			}()
+
+			payload := payloadPool.Get().(*fraud.Payload)
+			defer func() {
+				resetPayload(payload)
+				payloadPool.Put(payload)
+			}()
+
+			if err := json.Unmarshal(ctx.Request.Body(), payload); err != nil {
+				ctx.Response.SetBodyRaw(failSoftResponse)
+				return
+			}
+			count, err := idx.FraudCount(payload)
+			if err != nil {
+				ctx.Response.SetBodyRaw(failSoftResponse)
+				return
+			}
+			ctx.Response.SetBodyRaw(precomputedResponses[count])
+
+		case pathEquals(path, "/ready"):
+			ctx.Response.Header.Set("X-Instance", instance)
+			ctx.SetStatusCode(fasthttp.StatusOK)
+
+		default:
+			ctx.SetStatusCode(fasthttp.StatusNotFound)
+		}
+	}
+}
+
 func main() {
 	instance := envOrDefault("INSTANCE_ID", "api")
 	nprobeOverride := envOrDefault("IVF_NPROBE", "")
@@ -145,49 +203,29 @@ func main() {
 		log.Printf("[%s] IVF fullNprobe (two-stage) override: %s", instance, fullNprobeOverride)
 	}
 
-	ready := func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-Instance", instance)
-		w.WriteHeader(http.StatusOK)
-	}
-
-	fraudScore := func(w http.ResponseWriter, r *http.Request) {
-
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				log.Printf("[%s] handler panic recovered: %v", instance, recovered)
-				_, _ = w.Write(failSoftResponse)
-			}
-		}()
-
-		w.Header().Set("Content-Type", "application/json")
-
-		payload := payloadPool.Get().(*fraud.Payload)
-		defer func() {
-			resetPayload(payload)
-			payloadPool.Put(payload)
-		}()
-
-		if err := json.NewDecoder(r.Body).Decode(payload); err != nil {
-			_, _ = w.Write(failSoftResponse)
-			return
-		}
-		count, err := idx.FraudCount(payload)
-		if err != nil {
-			_, _ = w.Write(failSoftResponse)
-			return
-		}
-		_, _ = w.Write(precomputedResponses[count])
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /ready", ready)
-	mux.HandleFunc("POST /fraud-score", fraudScore)
-
 	listener, addr, err := listen(instance)
 	if err != nil {
 		log.Fatalf("[%s] %v", instance, err)
 	}
-	server := &http.Server{Handler: mux}
+
+	server := &fasthttp.Server{
+		Handler:                       buildHandler(idx, instance),
+		Name:                          "rinha-fraud",
+		ReadTimeout:                   750 * time.Millisecond,
+		WriteTimeout:                  750 * time.Millisecond,
+		IdleTimeout:                   10 * time.Second,
+		ReadBufferSize:                1024,
+		WriteBufferSize:               1024,
+		MaxRequestBodySize:            8 * 1024,
+		Concurrency:                   4096,
+		DisableHeaderNamesNormalizing: true,
+		NoDefaultDate:                 true,
+		NoDefaultServerHeader:         true,
+		NoDefaultContentType:          true,
+		DisablePreParseMultipartForm:  true,
+		TCPKeepalive:                  true,
+		LogAllErrors:                  false,
+	}
 	log.Printf("[%s] serving on %s", instance, addr)
 	if err := server.Serve(listener); err != nil {
 		log.Fatal(err)
