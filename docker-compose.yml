@@ -9,6 +9,7 @@ services:
       SOCKET_PATH: /run/sock/api1.sock
       GOMEMLIMIT: 140MiB
       GOGC: "200"
+      GC_MODE: "off"
       IVF_NPROBE: "${IVF_NPROBE:-}"
       IVF_FULL_NPROBE: "${IVF_FULL_NPROBE:-}"
     volumes:
@@ -28,6 +29,7 @@ services:
       SOCKET_PATH: /run/sock/api2.sock
       GOMEMLIMIT: 140MiB
       GOGC: "200"
+      GC_MODE: "off"
       IVF_NPROBE: "${IVF_NPROBE:-}"
       IVF_FULL_NPROBE: "${IVF_FULL_NPROBE:-}"
     volumes:
@@ -59,6 +61,21 @@ services:
         limits:
           cpus: "0.1"
           memory: "30MB"
+
+  warmup:
+    image: curlimages/curl:8.8.0
+    entrypoint: ["/bin/sh", "/warmup.sh"]
+    environment:
+      BASE_URL: http://load-balancer:9999
+      READY_RETRIES: "240"
+      READY_SLEEP: "0.25"
+      WARMUP_ROUNDS: "48"
+    volumes:
+      - ./scripts/warmup.sh:/warmup.sh:ro
+    depends_on:
+      - load-balancer
+    networks:
+      - rinha
 
 networks:
   rinha:

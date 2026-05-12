@@ -11,8 +11,9 @@ COPY internal ./internal
 # Build both binaries.
 # GOAMD64=v3 enables AVX2/BMI2 in code Go itself emits (the asm kernel always
 # uses AVX2; this flag covers everything else).
+# -pgo=auto picks up cmd/api/default.pgo for profile-guided optimization.
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v3 \
-    go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api && \
+    go build -pgo=auto -trimpath -ldflags="-s -w" -o /out/api ./cmd/api && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v3 \
     go build -trimpath -ldflags="-s -w" -o /out/preprocess ./cmd/preprocess
 

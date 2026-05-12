@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"time"
@@ -123,6 +124,18 @@ func listen(instance string) (net.Listener, string, error) {
 	return ln, ":" + port, nil
 }
 
+func tuneRuntime(instance string) {
+	debug.FreeOSMemory()
+	switch os.Getenv("GC_MODE") {
+	case "off":
+		debug.SetGCPercent(-1)
+		log.Printf("[%s] GC disabled after init", instance)
+	case "high":
+		debug.SetGCPercent(1000)
+		log.Printf("[%s] GC set to high threshold (1000%%)", instance)
+	}
+}
+
 func main() {
 	instance := envOrDefault("INSTANCE_ID", "api")
 	nprobeOverride := envOrDefault("IVF_NPROBE", "")
@@ -146,6 +159,8 @@ func main() {
 		}
 		log.Printf("[%s] IVF fullNprobe (two-stage) override: %s", instance, fullNprobeOverride)
 	}
+
+	tuneRuntime(instance)
 
 	ready := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-Instance", instance)
