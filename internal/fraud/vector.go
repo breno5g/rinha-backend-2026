@@ -52,32 +52,11 @@ type Constants struct {
 	MaxTxCount24h        float64 `json:"max_tx_count_24h"`
 	MaxMerchantAvgAmount float64 `json:"max_merchant_avg_amount"`
 
-	MccRiskTable [10000]float32
-}
-
-const mccDefaultRisk float32 = 0.5
-
-func mccIndex(code string) (int, bool) {
-	if len(code) != 4 {
-		return 0, false
-	}
-	idx := 0
-	for i := 0; i < 4; i++ {
-		c := code[i]
-		if c < '0' || c > '9' {
-			return 0, false
-		}
-		idx = idx*10 + int(c-'0')
-	}
-	return idx, true
+	MccRisk map[string]float64
 }
 
 func LoadConstants(normalizationPath, mccRiskPath string) (*Constants, error) {
 	c := &Constants{}
-	for i := range c.MccRiskTable {
-		c.MccRiskTable[i] = mccDefaultRisk
-	}
-
 	data, err := os.ReadFile(normalizationPath)
 	if err != nil {
 		return nil, fmt.Errorf("read normalization: %w", err)
@@ -90,16 +69,8 @@ func LoadConstants(normalizationPath, mccRiskPath string) (*Constants, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read mcc_risk: %w", err)
 	}
-	var raw map[string]float64
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if err := json.Unmarshal(data, &c.MccRisk); err != nil {
 		return nil, fmt.Errorf("parse mcc_risk: %w", err)
-	}
-	for code, risk := range raw {
-		idx, ok := mccIndex(code)
-		if !ok {
-			continue
-		}
-		c.MccRiskTable[idx] = float32(risk)
 	}
 	return c, nil
 }
@@ -173,10 +144,10 @@ func Vectorize(p *Payload, c *Constants) ([VectorDim]float32, error) {
 		v[11] = 1
 	}
 
-	if idx, ok := mccIndex(p.Merchant.MCC); ok {
-		v[12] = c.MccRiskTable[idx]
+	if risk, ok := c.MccRisk[p.Merchant.MCC]; ok {
+		v[12] = float32(risk)
 	} else {
-		v[12] = mccDefaultRisk
+		v[12] = 0.5
 	}
 
 	v[13] = float32(clamp01(p.Merchant.AvgAmount / c.MaxMerchantAvgAmount))

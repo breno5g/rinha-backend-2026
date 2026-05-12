@@ -6,7 +6,7 @@ import (
 )
 
 func testConstants() *Constants {
-	c := &Constants{
+	return &Constants{
 		MaxAmount:            10000,
 		MaxInstallments:      12,
 		AmountVsAvgRatio:     10,
@@ -14,26 +14,19 @@ func testConstants() *Constants {
 		MaxKm:                1000,
 		MaxTxCount24h:        20,
 		MaxMerchantAvgAmount: 10000,
+		MccRisk: map[string]float64{
+			"5411": 0.15,
+			"5812": 0.30,
+			"5912": 0.20,
+			"5944": 0.45,
+			"7801": 0.80,
+			"7802": 0.75,
+			"7995": 0.85,
+			"4511": 0.35,
+			"5311": 0.25,
+			"5999": 0.50,
+		},
 	}
-	for i := range c.MccRiskTable {
-		c.MccRiskTable[i] = mccDefaultRisk
-	}
-	for code, risk := range map[string]float32{
-		"5411": 0.15,
-		"5812": 0.30,
-		"5912": 0.20,
-		"5944": 0.45,
-		"7801": 0.80,
-		"7802": 0.75,
-		"7995": 0.85,
-		"4511": 0.35,
-		"5311": 0.25,
-		"5999": 0.50,
-	} {
-		idx, _ := mccIndex(code)
-		c.MccRiskTable[idx] = risk
-	}
-	return c
 }
 
 func vectorsClose(t *testing.T, got [VectorDim]float32, want [VectorDim]float32, tol float32) {
